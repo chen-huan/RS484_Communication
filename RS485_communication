@@ -1,0 +1,140 @@
+# -*- coding: utf-8 -*-
+
+from socket import timeout
+import serial
+import pymysql
+import time
+import datetime
+import csv
+import matplotlib.pyplot as plt
+import numpy as np
+from collections import deque
+import matplotlib.dates as mdates
+
+#start_time = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())#测试起始时间
+
+
+# str_return_data = '080328A71342327FA34243B5C8424711DF427FE9624241AB4642053CC342E3F1EB424A340D424D0A6E426E5B00'
+
+def get_time(start_time):#这个函数是为了获得时间信息，一方面包括时刻，而另一方面包括距离测试开始时刻的时间差。
+    timen = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())#获得当前测试时间。
+    now = datetime.datetime.now()#同样是获得当前测试时间，只是格式不一样。
+    time_diff = now - start_time#给定测试起始时间后，每次测量时与其的时间差。
+    hours_diff = time_diff / datetime.timedelta(hours=1)
+    #print(hours_diff)
+    return [timen,hours_diff]#把当前时间和与开始测试时的时间差输出
+
+def conn():#这个函数的作用是通过发送命令而接收串口的实时数据，对于不同的产品，需要查获说明书或得。简单来说就是一问一答，发送特定的字符串，获得串口的返回数据。
+    ser = serial.Serial("com4", 9600, timeout=1)
+    # 选择串口，并设置波特率
+    send_data = bytes.fromhex('01 03 00 01 00 02 95 CB')  # 这里来自于串口说明书。
+    if ser.is_open:
+        #print("串口成功打开")
+        try:
+            ser.write(send_data)
+            # 发送命令
+            #print('发送数据：', send_data)
+            time.sleep(0.1)
+            # 延时，否则len_return_data将返回0，此处易忽视！！！
+            len_return_data = ser.inWaiting()
+            return_data = ser.read(len_return_data)
+            #print('收到数据：', return_data)
+            str_return_data = str(return_data.hex())
+            #print('收到字符：', str_return_data)
+            ser.close()
+            return str_return_data #将从串口接收到的字符串输出
+        except Exception as e:
+            print(str(e))
+            ser.close()
+            #continue
+    else:
+        print("port open failed")
+        print("port closed")
+        ser.close()
+        return None
+
+
+def getg(str_return_data):#将从串口接收到的字符字符串转化成压力数值，算法依据串口说明书。此函数的数值依赖于控制器的参数设置。这是本程序的核心算法和核心函数。
+    n=10#小数点的位数，10的次方
+    substrings = []
+    output_str =str_return_data[6:15]  # 截取获取到的字符串的第7到第15个字符
+    for i in range(0, len(output_str), 2): #将字符按照第7和第8，第9和第10这样的顺序截取成4组字符
+        substrings.append(output_str[i:i + 2])
+    decimal_values = []
+    for s in substrings: #将得到的列表中的字符从16进制转换成10进制
+        decimal_values.append(int(s, 16))
+    #print(decimal_values)
+    result = 0
+    for i in range(len(decimal_values)): #第一个值乘以256的三次方+第2个值乘以256的2次方+第3个值乘以256+第4个值获得压力值
+        result += decimal_values[i] * 256 ** (3 - i)
+    #print(result)
+    g=int(result)/n
+    #print('压力数据(g)：',g)
+    return(g)
+
+
+def save_data(a,b,c):#用来将数据保存到CVS表格中
+    with open('5_04_ncm83-M_10_5mg.csv', mode='a', newline='') as file:
+        writer = csv.writer(file)
+        # 将数据写入 CSV 文件
+        writer.writerow([a, b, c])#这里写入的数据包括测试时刻，测试的时间长度，以及转化得到的压力数值。
+
+
+def main():
+    print("串口成功打开")
+    fig, ax = plt.subplots()
+    plt.title('Real-time Data')
+    plt.xlabel('Time')
+    plt.ylabel('Value')
+
+    x_data = []
+    y_data = []
+
+    # 设置x轴格式为日期
+    plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M:%S'))
+
+    line, = ax.plot_date(x_data, y_data, linestyle='-', marker='o')
+
+    plt.gcf().autofmt_xdate()
+
+    # 获取当前时间
+    start_time = datetime.datetime.now()  # 测试起始时间
+
+    while True:
+        # 获取当前时间戳
+        current_time = time.time()
+        now_str, hours_diff = get_time(start_time)
+        now=datetime.datetime.strptime(now_str, '%Y-%m-%d %H:%M:%S')
+        # 添加新的数据点到数组中
+        x_data.append(now)
+
+        st = conn()  # 采样得到的字符串
+        # a = str_return_data
+        c = getg(st)  # 解析得到的数据
+        time.sleep(0.9)
+        get_time(start_time)
+        a = get_time(start_time)[0]  # 采样时刻
+        b = get_time(start_time)[1]  # 采样时间
+        #print(get_time(start_time))
+        save_data(a, b, c)
+
+        y_data.append(c)
+        # 检查x轴数组的第一个元素是否超过15分钟，如果超过则删除它
+        while len(x_data) > 0 and (now - x_data[0]).total_seconds() / 60 > 15:
+            x_data.pop(0)
+            y_data.pop(0)
+        # 更新x轴和y轴的数据
+        line.set_xdata(x_data)
+        line.set_ydata(y_data)
+        # 设置x轴范围
+        plt.xlim([now - datetime.timedelta(minutes=15), now])
+        plt.ylim([1500, 3500])
+        # 重新绘制图形
+        plt.draw()
+        plt.pause(0.1)
+        continue
+
+    #x,y=plot(x,y,b,c)
+if __name__ == "__main__":  # 起到一个初始化或者调用函数的作用
+    main()
+
